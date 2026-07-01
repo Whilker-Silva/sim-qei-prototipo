@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SIM-QEI | Protótipo AV3</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>SIM-QEI</h1>
+      <p>Service-as-a-Software para Qualidade de Energia Industrial</p>
+    </div>
+    <div class="status-pill" id="apiStatus">Conectando...</div>
+  </header>
+
+  <main class="container">
+    <section class="hero-card">
+      <div>
+        <h2>Protótipo funcional com dados simulados</h2>
+        <p>
+          Edge simulado gera dados elétricos, o backend grava no banco, o agente detecta anomalias e o dashboard apresenta KPIs, alarmes e recomendações.
+        </p>
+      </div>
+      <div class="hero-grid">
+        <span>Edge + Cloud</span>
+        <span>Banco PostgreSQL</span>
+        <span>API Gateway lógico</span>
+        <span>Agente IA determinístico</span>
+      </div>
+    </section>
+
+    <section class="cards">
+      <article class="card">
+        <span class="label">Potência total</span>
+        <strong id="kpiPower">--</strong>
+        <small>kW atuais</small>
+      </article>
+      <article class="card">
+        <span class="label">Fator de potência médio</span>
+        <strong id="kpiPF">--</strong>
+        <small>limite operacional: 0,92</small>
+      </article>
+      <article class="card">
+        <span class="label">THDv média</span>
+        <strong id="kpiTHD">--</strong>
+        <small>referência protótipo: até 5%</small>
+      </article>
+      <article class="card danger-card">
+        <span class="label">Alarmes última hora</span>
+        <strong id="kpiAlarms">--</strong>
+        <small>eventos abertos/simulados</small>
+      </article>
+    </section>
+
+    <section class="grid two-columns">
+      <article class="panel">
+        <div class="panel-header">
+          <h3>Tendência de Qualidade de Energia</h3>
+          <select id="cdcSelect">
+            <option value="CDC-01">CDC-01</option>
+            <option value="CDC-02">CDC-02</option>
+            <option value="CDC-03">CDC-03</option>
+          </select>
+        </div>
+        <canvas id="trendChart" width="900" height="340"></canvas>
+        <div class="legend">
+          <span><i class="line voltage"></i>Tensão média normalizada</span>
+          <span><i class="line pf"></i>Fator de potência normalizado</span>
+          <span><i class="line thd"></i>THDv normalizada</span>
+        </div>
+      </article>
+
+      <article class="panel agent-panel">
+        <div class="panel-header">
+          <h3>Agente Autônomo SIM-QEI</h3>
+        </div>
+        <div id="agentAnswer" class="agent-answer">
+          Faça uma pergunta para o agente ou aguarde os primeiros dados simulados.
+        </div>
+        <div class="quick-actions">
+          <button data-question="Gere um relatório executivo da qualidade de energia agora">Relatório executivo</button>
+          <button data-question="Como está o fator de potência?">Fator de potência</button>
+          <button data-question="Existe problema de harmônicas ou THD?">Harmônicas</button>
+          <button data-question="Como estão as tensões e eventos de sag ou swell?">Tensão</button>
+        </div>
+        <form id="chatForm" class="chat-form">
+          <input id="chatInput" placeholder="Pergunte ao agente..." />
+          <button type="submit">Enviar</button>
+        </form>
+      </article>
+    </section>
+
+    <section class="grid two-columns">
+      <article class="panel">
+        <div class="panel-header">
+          <h3>Últimas leituras por CDC</h3>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>CDC</th>
+                <th>Tensão média</th>
+                <th>Corrente média</th>
+                <th>FP</th>
+                <th>THDv</th>
+                <th>Evento</th>
+              </tr>
+            </thead>
+            <tbody id="latestTable"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-header">
+          <h3>Alarmes e recomendações</h3>
+        </div>
+        <div id="alarmsList" class="alarms-list"></div>
+      </article>
+    </section>
+
+    <section class="panel architecture-panel">
+      <h3>Fluxo da arquitetura do protótipo</h3>
+      <div class="arch-flow">
+        <div>Simulador Edge<br><small>Python</small></div>
+        <span>→</span>
+        <div>Backend/API<br><small>FastAPI</small></div>
+        <span>→</span>
+        <div>Banco<br><small>PostgreSQL</small></div>
+        <span>→</span>
+        <div>Agente IA<br><small>Regras + Decisão</small></div>
+        <span>→</span>
+        <div>Frontend<br><small>Nginx + JS</small></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>SIM-QEI AV3 • Protótipo acadêmico • Frontend em http://localhost:8080 • API em http://localhost:8000</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
