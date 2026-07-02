@@ -234,4 +234,4 @@ document.querySelectorAll('[data-question]').forEach((btn) => {
 
 refreshAll();
 setInterval(refreshAll, 3000);
-setTimeout(() => askAgent('Gere um relatório executivo da qualidade de energia agora'), 5000);
+//setTimeout(() => askAgent('Gere um relatório executivo da qualidade de energia agora'), 5000);
