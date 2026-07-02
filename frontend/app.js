@@ -234,4 +234,6 @@ document.querySelectorAll('[data-question]').forEach((btn) => {
 
 refreshAll();
 setInterval(refreshAll, 3000);
-//setTimeout(() => askAgent('Gere um relatório executivo da qualidade de energia agora'), 5000);
+// Pergunta automática desativada para não travar o Ollama em servidores sem GPU.
+// Clique nos botões do agente ou envie uma pergunta manualmente.
+// setTimeout(() => askAgent('Gere um relatório executivo da qualidade de energia agora'), 5000);

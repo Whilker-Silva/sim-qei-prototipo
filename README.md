@@ -120,3 +120,49 @@ curl http://localhost:8000/api/llm/status
 ## Observação
 
 O protótipo é acadêmico. Os dados são simulados e as recomendações não devem ser aplicadas em sistemas elétricos reais sem validação de engenharia, normas de segurança e análise de risco.
+
+## Ajuste de desempenho do LLM local
+
+Esta versão já vem com uma correção para servidores sem GPU:
+
+- o front-end não dispara mais pergunta automática ao abrir a tela;
+- o backend envia um **contexto compacto** para o Ollama, em vez do JSON completo do banco;
+- `num_ctx` foi reduzido para 2048;
+- `num_predict` foi limitado para 220 tokens;
+- o timeout padrão do backend foi aumentado para 180 segundos.
+
+Se quiser verificar se o contexto realmente ficou menor, rode:
+
+```bash
+docker logs -f --tail=80 simqei_ollama
+```
+
+Ao fazer uma pergunta pelo chat, procure no log do Ollama por algo como `task.n_tokens`. O esperado é ficar muito abaixo dos ~7700 tokens da versão anterior.
+
+Teste direto pelo backend:
+
+```bash
+time curl -s -X POST http://localhost:8000/api/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question":"Qual CDC está mais crítico agora?"}'
+```
+
+Em servidores mais fracos, você pode usar um modelo menor:
+
+```bash
+docker exec -it simqei_ollama ollama pull qwen2.5:0.5b
+```
+
+Depois edite `.env`:
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=qwen2.5:0.5b
+LLM_TIMEOUT_SECONDS=180
+```
+
+E recrie o backend:
+
+```bash
+docker compose up --build -d backend
+```

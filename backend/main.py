@@ -24,7 +24,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip()
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b").strip()
-LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
 
 app = FastAPI(
     title="SIM-QEI API",
@@ -663,20 +663,102 @@ def build_deterministic_answer(question: str, context: Dict[str, Any]) -> Dict[s
     return {"answer": answer, "provider": "deterministic"}
 
 
+def compact_context_for_llm(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Reduz o contexto enviado ao LLM.
+
+    A versão anterior enviava praticamente todo o snapshot do banco em JSON
+    indentado. Em máquinas sem GPU isso gerava prompts de 7k+ tokens e o
+    Ollama estourava timeout antes de responder. Esta função preserva os dados
+    importantes para diagnóstico, mas remove campos pouco relevantes e limita
+    alarmes/decisões recentes.
+    """
+    latest = []
+    for r in context.get("latest_by_cdc", []):
+        voltage_a = float(r.get("voltage_a") or 0)
+        voltage_b = float(r.get("voltage_b") or 0)
+        voltage_c = float(r.get("voltage_c") or 0)
+        latest.append({
+            "cdc": r.get("cdc"),
+            "potencia_kw": r.get("active_power_kw"),
+            "fator_potencia": r.get("power_factor"),
+            "thd_tensao_pct": r.get("thd_voltage"),
+            "thd_corrente_pct": r.get("thd_current"),
+            "freq_hz": r.get("frequency"),
+            "tensao_media_v": round((voltage_a + voltage_b + voltage_c) / 3, 2),
+            "evento_atual": r.get("event_type"),
+        })
+
+    alarms = []
+    for a in context.get("recent_alarms", [])[:5]:
+        alarms.append({
+            "cdc": a.get("cdc"),
+            "tipo": a.get("type"),
+            "severidade": a.get("severity"),
+            "descricao": a.get("description"),
+            "recomendacao": a.get("recommendation"),
+            "valor": a.get("value"),
+            "status": a.get("status"),
+        })
+
+    decisions = []
+    for d in context.get("recent_decisions", [])[:3]:
+        decisions.append({
+            "cdc": d.get("cdc"),
+            "entrada": d.get("input_summary"),
+            "acao": d.get("action"),
+            "metrica": d.get("performance_metric"),
+        })
+
+    # Resume estatísticas por CDC sem repetir amostras individuais.
+    stats = {}
+    for cdc, values in (context.get("window_stats_by_cdc") or {}).items():
+        stats[cdc] = {
+            "amostras": values.get("samples"),
+            "fp_medio": values.get("avg_power_factor"),
+            "fp_minimo": values.get("min_power_factor"),
+            "thdv_medio_pct": values.get("avg_thd_voltage_pct"),
+            "thdv_max_pct": values.get("max_thd_voltage_pct"),
+            "tensao_min_v": values.get("min_voltage_v"),
+            "tensao_max_v": values.get("max_voltage_v"),
+            "evento_mais_recente": values.get("latest_event_type"),
+        }
+
+    return {
+        "resumo_global": context.get("global_snapshot", {}),
+        "leituras_atuais_por_cdc": latest,
+        "estatisticas_janela_por_cdc": stats,
+        "ultimos_alarmes": alarms,
+        "ultimas_decisoes": decisions,
+        "limites_operacionais": {
+            "fator_potencia_minimo": 0.92,
+            "thd_tensao_max_pct": 5.0,
+            "sag_tensao_menor_que_v": 198.0,
+            "swell_tensao_maior_que_v": 242.0,
+            "frequencia_min_hz": 59.5,
+            "frequencia_max_hz": 60.5,
+        },
+    }
+
+
 def make_llm_messages(question: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
     system = (
         "Você é o Agente Autônomo do SIM-QEI, um sistema de qualidade de energia industrial. "
-        "Responda em português do Brasil, com linguagem técnica mas objetiva. "
-        "Use exclusivamente os dados fornecidos no CONTEXTO. Não invente medições, alarmes, horários ou causas. "
-        "Quando não houver dados suficientes, diga claramente que não há evidência suficiente. "
-        "Sempre que útil, cite valores numéricos dos CDCs, limite de FP 0,92, limite de THDv 5%, sag <198 V e swell >242 V. "
-        "Separe a resposta em: Diagnóstico, Evidências, Recomendação e Métrica de acompanhamento. "
-        "Lembre que os dados são simulados para um protótipo acadêmico."
+        "Responda em português do Brasil, de forma objetiva e técnica. "
+        "Use exclusivamente os dados fornecidos no CONTEXTO COMPACTO. "
+        "Não invente medições, alarmes, horários ou causas. "
+        "Quando não houver evidência suficiente, diga isso claramente. "
+        "Sempre que possível, cite valores numéricos dos CDCs. "
+        "Organize a resposta em: Diagnóstico, Evidências, Recomendação e Métrica de acompanhamento. "
+        "Não repita o JSON completo na resposta."
     )
-    context_json = json.dumps(context, ensure_ascii=False, default=str)
-    user = f"CONTEXTO OPERACIONAL DO BANCO DE DADOS:\n{context_json}\n\nPERGUNTA DO USUÁRIO:\n{question}"
+    compact_context = compact_context_for_llm(context)
+    context_json = json.dumps(compact_context, ensure_ascii=False, separators=(",", ":"), default=str)
+    user = (
+        f"CONTEXTO COMPACTO DO BANCO DE DADOS:\n{context_json}\n\n"
+        f"PERGUNTA DO USUÁRIO:\n{question}\n\n"
+        "Responda de forma direta e não repita todo o contexto."
+    )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
-
 
 def call_ollama(question: str, context: Dict[str, Any]) -> Dict[str, Any]:
     messages = make_llm_messages(question, context)
@@ -684,7 +766,7 @@ def call_ollama(question: str, context: Dict[str, Any]) -> Dict[str, Any]:
         "model": OLLAMA_MODEL,
         "messages": messages,
         "stream": False,
-        "options": {"temperature": 0.15, "num_ctx": 2048, "num_predict": 350},
+        "options": {"temperature": 0.15, "num_ctx": 2048, "num_predict": 220, "top_p": 0.9},
     }
     with httpx.Client(timeout=LLM_TIMEOUT_SECONDS) as client:
         res = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
