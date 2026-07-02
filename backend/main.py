@@ -673,7 +673,7 @@ def make_llm_messages(question: str, context: Dict[str, Any]) -> List[Dict[str, 
         "Separe a resposta em: Diagnóstico, Evidências, Recomendação e Métrica de acompanhamento. "
         "Lembre que os dados são simulados para um protótipo acadêmico."
     )
-    context_json = json.dumps(context, ensure_ascii=False, indent=2, default=str)
+    context_json = json.dumps(context, ensure_ascii=False, default=str)
     user = f"CONTEXTO OPERACIONAL DO BANCO DE DADOS:\n{context_json}\n\nPERGUNTA DO USUÁRIO:\n{question}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -684,7 +684,7 @@ def call_ollama(question: str, context: Dict[str, Any]) -> Dict[str, Any]:
         "model": OLLAMA_MODEL,
         "messages": messages,
         "stream": False,
-        "options": {"temperature": 0.15, "num_ctx": 8192},
+        "options": {"temperature": 0.15, "num_ctx": 2048, "num_predict": 350},
     }
     with httpx.Client(timeout=LLM_TIMEOUT_SECONDS) as client:
         res = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
