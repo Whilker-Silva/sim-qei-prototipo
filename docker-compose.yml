@@ -15,14 +15,24 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
   ollama:
     image: ollama/ollama:latest
     container_name: simqei_ollama
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: 10m
+      OLLAMA_NUM_PARALLEL: 1
     ports:
       - "11434:11434"
     volumes:
       - simqei_ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     restart: unless-stopped
 
   ollama-pull:
@@ -32,9 +42,31 @@ services:
       OLLAMA_HOST: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
     entrypoint: ["/bin/sh", "-c"]
-    command: "sleep 8 && ollama pull $$OLLAMA_MODEL || true"
+    command: >
+      '
+      echo "Aguardando servidor Ollama ficar disponível...";
+      until ollama list >/dev/null 2>&1; do
+        echo "Ollama ainda não está pronto. Tentando novamente em 3s...";
+        sleep 3;
+      done;
+
+      echo "Verificando modelo: $$OLLAMA_MODEL";
+
+      if ollama list | grep -q "$$OLLAMA_MODEL"; then
+        echo "Modelo $$OLLAMA_MODEL já está baixado.";
+      else
+        echo "Baixando modelo $$OLLAMA_MODEL...";
+        ollama pull $$OLLAMA_MODEL;
+      fi;
+
+      echo "Modelos disponíveis:";
+      ollama list;
+
+      echo "Ollama pronto para uso."
+      '
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
     restart: "no"
 
   backend:
@@ -43,7 +75,9 @@ services:
     environment:
       DATABASE_URL: postgresql://simqei:simqei@db:5432/simqei
       CORS_ORIGINS: "*"
-      # Por padrão usa LLM local via Ollama. Para usar OpenAI, configure LLM_PROVIDER=openai e OPENAI_API_KEY no arquivo .env.
+
+      # Por padrão usa LLM local via Ollama.
+      # Para usar OpenAI, configure LLM_PROVIDER=openai e OPENAI_API_KEY no arquivo .env.
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       OLLAMA_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
@@ -56,7 +90,9 @@ services:
       db:
         condition: service_healthy
       ollama:
-        condition: service_started
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   edge-simulator:
