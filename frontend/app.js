@@ -11,6 +11,7 @@ const els = {
   chart: document.getElementById('trendChart'),
   cdcSelect: document.getElementById('cdcSelect'),
   agentAnswer: document.getElementById('agentAnswer'),
+  llmStatus: document.getElementById('llmStatus'),
   chatForm: document.getElementById('chatForm'),
   chatInput: document.getElementById('chatInput'),
 };
@@ -43,6 +44,24 @@ async function refreshStatus() {
   } catch (err) {
     els.status.textContent = 'API offline';
     els.status.className = 'status-pill offline';
+  }
+}
+
+
+async function refreshLLMStatus() {
+  if (!els.llmStatus) return;
+  try {
+    const data = await fetchJSON(`${API_BASE}/llm/status`);
+    let txt = `LLM: ${data.configured_provider}`;
+    if (data.configured_provider === 'ollama') {
+      txt += data.ollama_available ? ` • ${data.ollama_model}` : ' • aguardando Ollama/modelo';
+    }
+    if (data.configured_provider === 'openai') {
+      txt += data.openai_key_configured ? ` • ${data.openai_model}` : ' • chave não configurada';
+    }
+    els.llmStatus.textContent = txt;
+  } catch (err) {
+    els.llmStatus.textContent = 'LLM: status indisponível';
   }
 }
 
@@ -183,7 +202,8 @@ async function askAgent(question) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question }),
     });
-    els.agentAnswer.textContent = data.answer;
+    const meta = data.provider ? `\n\n— Fonte: ${data.provider}${data.model ? ' / ' + data.model : ''}` : '';
+    els.agentAnswer.textContent = data.answer + meta;
   } catch (err) {
     els.agentAnswer.textContent = `Falha ao consultar agente: ${err.message}`;
   }
@@ -191,6 +211,7 @@ async function askAgent(question) {
 
 async function refreshAll() {
   await refreshStatus();
+  await refreshLLMStatus();
   try {
     await Promise.all([refreshKPIs(), refreshLatest(), refreshAlarms(), refreshChart()]);
   } catch (err) {

@@ -20,14 +20,14 @@
       <div>
         <h2>Protótipo funcional com dados simulados</h2>
         <p>
-          Edge simulado gera dados elétricos, o backend grava no banco, o agente detecta anomalias e o dashboard apresenta KPIs, alarmes e recomendações.
+          Edge simulado gera dados elétricos, o backend grava no banco, o agente detecta anomalias e o chat consulta um LLM com contexto real das leituras, alarmes e decisões.
         </p>
       </div>
       <div class="hero-grid">
         <span>Edge + Cloud</span>
         <span>Banco PostgreSQL</span>
         <span>API Gateway lógico</span>
-        <span>Agente IA determinístico</span>
+        <span>Agente IA + LLM</span>
       </div>
     </section>
 
@@ -75,6 +75,7 @@
       <article class="panel agent-panel">
         <div class="panel-header">
           <h3>Agente Autônomo SIM-QEI</h3>
+          <small id="llmStatus" class="llm-status">LLM: verificando...</small>
         </div>
         <div id="agentAnswer" class="agent-answer">
           Faça uma pergunta para o agente ou aguarde os primeiros dados simulados.
@@ -131,7 +132,7 @@
         <span>→</span>
         <div>Banco<br><small>PostgreSQL</small></div>
         <span>→</span>
-        <div>Agente IA<br><small>Regras + Decisão</small></div>
+        <div>Agente IA<br><small>Regras + LLM contextual</small></div>
         <span>→</span>
         <div>Frontend<br><small>Nginx + JS</small></div>
       </div>

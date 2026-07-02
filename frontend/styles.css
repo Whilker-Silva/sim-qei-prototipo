@@ -176,3 +176,12 @@ footer { text-align: center; color: var(--muted); padding: 28px; }
   .hero-card, .two-columns, .cards { grid-template-columns: 1fr; }
   .topbar { align-items: flex-start; gap: 16px; flex-direction: column; }
 }
+.llm-status {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(73, 163, 255, 0.09);
+  border: 1px solid rgba(73, 163, 255, 0.22);
+  border-radius: 999px;
+  padding: 6px 10px;
+}

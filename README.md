@@ -1,43 +1,122 @@
-# SIM-QEI - Protótipo funcional com dados simulados
+# SIM-QEI — Protótipo AV3 com LLM contextualizado
 
-Protótipo da arquitetura AV3 do SIM-QEI: simulação de dados elétricos, banco de dados, backend, agente de IA determinístico e frontend web.
+Protótipo funcional do **Sistema Inteligente de Monitoramento de Qualidade de Energia Industrial (SIM-QEI)** em Docker.
+
+O sistema sobe com um único `docker compose` e inclui:
+
+- banco PostgreSQL;
+- backend FastAPI;
+- simulador Edge em Python;
+- frontend web em Nginx;
+- agente decisório por regras;
+- integração com LLM usando contexto real do banco;
+- LLM local via Ollama por padrão;
+- suporte opcional à OpenAI API.
 
 ## Como executar
 
 ```bash
-unzip sim-qei-prototipo.zip
+unzip sim-qei-prototipo-llm.zip
 cd sim-qei-prototipo
 docker compose up --build
 ```
 
-Aguarde de 20 a 40 segundos na primeira execução. O simulador começa a enviar dados automaticamente.
+Na primeira execução, o Docker Compose também sobe o Ollama e tenta baixar o modelo configurado em `OLLAMA_MODEL`, por padrão `qwen2.5:1.5b`. Esse download pode demorar alguns minutos.
 
 ## Portas
 
 - Frontend: http://localhost:8080
 - Backend/API: http://localhost:8000
-- Documentação interativa da API: http://localhost:8000/docs
+- Documentação da API: http://localhost:8000/docs
+- Ollama: http://localhost:11434
 - PostgreSQL: localhost:5432
 
-## O que roda no Docker Compose
+Em outro computador da mesma rede, troque `localhost` pelo IP do servidor. Exemplo:
 
-- `db`: PostgreSQL 16, usado como banco de séries temporais simplificado.
-- `backend`: FastAPI com endpoints REST, análise de qualidade de energia e agente decisório.
-- `edge-simulator`: simulador de gateway Edge gerando eventos de qualidade de energia.
-- `frontend`: dashboard web estático servido por Nginx.
+```text
+http://192.168.1.2:8080
+```
 
-## Eventos simulados
+## Como funciona o chat com LLM
 
-O simulador injeta automaticamente cenários como:
+Quando você pergunta algo no chat, o backend:
 
-- operação normal;
-- baixo fator de potência;
-- THD elevado;
-- sag de tensão;
-- swell de tensão.
+1. consulta as últimas leituras no banco;
+2. calcula um resumo da janela recente;
+3. recupera alarmes e decisões do agente;
+4. monta um contexto estruturado em JSON;
+5. envia a pergunta + contexto para o LLM;
+6. força o LLM a responder apenas com base nesses dados.
 
-## Observações
+A resposta deve trazer diagnóstico, evidências, recomendação e métrica de acompanhamento.
 
-Este protótipo usa PostgreSQL puro para aumentar compatibilidade em diferentes máquinas Linux. Em uma versão industrial, o banco de séries temporais pode ser substituído por TimescaleDB ou InfluxDB sem alterar o conceito da arquitetura.
+## Usar LLM local com Ollama
 
-O agente de IA deste protótipo é determinístico/simbólico para fins de demonstração acadêmica: ele recebe telemetria, detecta eventos, classifica severidade, recomenda ações, registra decisões e responde perguntas no painel. Em produção, essa camada pode ser complementada com LLM + RAG e modelos de detecção de anomalias.
+É o modo padrão:
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=qwen2.5:1.5b
+```
+
+Para trocar o modelo, crie um arquivo `.env` a partir do exemplo:
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Exemplo usando um modelo diferente:
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=llama3.2:1b
+```
+
+Depois rode:
+
+```bash
+docker compose up --build
+```
+
+## Usar OpenAI API em vez do Ollama
+
+Crie o arquivo `.env`:
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Configure:
+
+```env
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sua_chave_aqui
+OPENAI_MODEL=gpt-5.4-mini
+```
+
+Depois rode novamente:
+
+```bash
+docker compose up --build -d
+```
+
+## Testar status do LLM
+
+```bash
+curl http://localhost:8000/api/llm/status
+```
+
+## Exemplo de perguntas para o chat
+
+- Como está o fator de potência agora?
+- Qual CDC está mais crítico?
+- Existe problema de harmônicas?
+- Gere um relatório executivo da qualidade de energia.
+- Quais alarmes ocorreram nas últimas duas horas e quais ações recomenda?
+- Qual é a evidência técnica para a recomendação do agente?
+
+## Observação
+
+O protótipo é acadêmico. Os dados são simulados e as recomendações não devem ser aplicadas em sistemas elétricos reais sem validação de engenharia, normas de segurança e análise de risco.

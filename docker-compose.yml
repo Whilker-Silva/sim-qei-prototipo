@@ -16,17 +16,47 @@ services:
       timeout: 5s
       retries: 10
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: simqei_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - simqei_ollama:/root/.ollama
+    restart: unless-stopped
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: simqei_ollama_pull
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
+    entrypoint: ["/bin/sh", "-c"]
+    command: "sleep 8 && ollama pull $$OLLAMA_MODEL || true"
+    depends_on:
+      - ollama
+    restart: "no"
+
   backend:
     build: ./backend
     container_name: simqei_backend
     environment:
       DATABASE_URL: postgresql://simqei:simqei@db:5432/simqei
       CORS_ORIGINS: "*"
+      # Por padrão usa LLM local via Ollama. Para usar OpenAI, configure LLM_PROVIDER=openai e OPENAI_API_KEY no arquivo .env.
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-45}
     ports:
       - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
+      ollama:
+        condition: service_started
     restart: unless-stopped
 
   edge-simulator:
@@ -53,3 +83,4 @@ services:
 
 volumes:
   simqei_pgdata:
+  simqei_ollama:

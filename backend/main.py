@@ -1,9 +1,11 @@
+import json
+import math
 import os
 import time
-import math
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
+import httpx
 import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException, Query
@@ -13,10 +15,21 @@ from pydantic import BaseModel, Field
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://simqei:simqei@localhost:5432/simqei")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 
+# Provedores possíveis:
+# - ollama: LLM local via container Ollama
+# - openai: API OpenAI usando OPENAI_API_KEY
+# - mock/deterministic: resposta por regras, sem LLM
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip()
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b").strip()
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
+
 app = FastAPI(
     title="SIM-QEI API",
-    description="Backend do protótipo funcional do SIM-QEI com simulação de qualidade de energia e agente de IA determinístico.",
-    version="0.1.0",
+    description="Backend do protótipo funcional do SIM-QEI com simulação de qualidade de energia, agente decisório e integração opcional com LLM.",
+    version="0.2.0",
 )
 
 app.add_middleware(
@@ -35,7 +48,11 @@ def get_conn():
 def row_to_dict(row):
     if row is None:
         return None
-    return dict(row)
+    data = dict(row)
+    for key, value in list(data.items()):
+        if isinstance(value, datetime):
+            data[key] = value.isoformat()
+    return data
 
 
 class TelemetryIn(BaseModel):
@@ -117,6 +134,18 @@ def init_db():
         action TEXT NOT NULL,
         performance_metric TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS chat_logs (
+        id SERIAL PRIMARY KEY,
+        ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        provider TEXT NOT NULL,
+        model TEXT,
+        question TEXT NOT NULL,
+        answer TEXT NOT NULL,
+        context_summary JSONB
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_chat_logs_ts ON chat_logs(ts DESC);
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -268,7 +297,13 @@ def health():
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1;")
-        return {"status": "ok", "service": "simqei_backend"}
+        return {
+            "status": "ok",
+            "service": "simqei_backend",
+            "llm_provider": LLM_PROVIDER,
+            "ollama_model": OLLAMA_MODEL,
+            "openai_model": OPENAI_MODEL if bool(OPENAI_API_KEY) else None,
+        }
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=str(exc))
 
@@ -438,7 +473,6 @@ def kpis():
 
     avg_power_kw = safe_float(metrics.get("avg_power_kw"))
     samples = int(metrics.get("samples") or 0)
-    # Aproximação demonstrativa: janela de 10 min
     estimated_energy_kwh = avg_power_kw * (10 / 60) if samples > 0 else 0
     estimated_cost_brl = estimated_energy_kwh * 0.85
 
@@ -456,8 +490,29 @@ def kpis():
     }
 
 
-def build_agent_answer(question: str) -> Dict[str, Any]:
-    q = question.lower().strip()
+def summarize_cdc_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    by_cdc: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        by_cdc.setdefault(row["cdc"], []).append(row)
+
+    stats = {}
+    for cdc, items in by_cdc.items():
+        voltages = [((x["voltage_a"] + x["voltage_b"] + x["voltage_c"]) / 3) for x in items]
+        stats[cdc] = {
+            "samples": len(items),
+            "avg_power_kw": round(sum(x["active_power_kw"] for x in items) / len(items), 2),
+            "avg_power_factor": round(sum(x["power_factor"] for x in items) / len(items), 4),
+            "min_power_factor": round(min(x["power_factor"] for x in items), 4),
+            "avg_thd_voltage_pct": round(sum(x["thd_voltage"] for x in items) / len(items), 3),
+            "max_thd_voltage_pct": round(max(x["thd_voltage"] for x in items), 3),
+            "min_voltage_v": round(min(voltages), 2),
+            "max_voltage_v": round(max(voltages), 2),
+            "latest_event_type": items[-1]["event_type"],
+        }
+    return stats
+
+
+def collect_agent_context() -> Dict[str, Any]:
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -468,33 +523,90 @@ def build_agent_answer(question: str) -> Dict[str, Any]:
                 """
             )
             latest_rows = [row_to_dict(r) for r in cur.fetchall()]
+
+            cur.execute(
+                """
+                SELECT * FROM telemetry
+                WHERE ts > NOW() - INTERVAL '15 minutes'
+                ORDER BY ts ASC
+                LIMIT 900;
+                """
+            )
+            window_rows = [row_to_dict(r) for r in cur.fetchall()]
+
             cur.execute(
                 """
                 SELECT * FROM alarms
-                WHERE ts > NOW() - INTERVAL '1 hour'
+                WHERE ts > NOW() - INTERVAL '2 hours'
                 ORDER BY ts DESC
-                LIMIT 10;
+                LIMIT 20;
                 """
             )
             recent_alarms = [row_to_dict(r) for r in cur.fetchall()]
+
             cur.execute(
                 """
                 SELECT * FROM agent_decisions
                 ORDER BY ts DESC
-                LIMIT 5;
+                LIMIT 10;
                 """
             )
             recent_decisions = [row_to_dict(r) for r in cur.fetchall()]
 
     if not latest_rows:
         return {
-            "answer": "Ainda não há dados no banco. Aguarde o simulador Edge enviar as primeiras leituras.",
-            "sources": [],
+            "has_data": False,
+            "message": "Ainda não há dados no banco.",
+            "latest_by_cdc": [],
+            "window_stats_by_cdc": {},
+            "recent_alarms": [],
+            "recent_decisions": [],
         }
 
-    avg_pf = sum(r["power_factor"] for r in latest_rows) / len(latest_rows)
-    avg_thd = sum(r["thd_voltage"] for r in latest_rows) / len(latest_rows)
-    total_kw = sum(r["active_power_kw"] for r in latest_rows)
+    avg_pf = round(sum(r["power_factor"] for r in latest_rows) / len(latest_rows), 4)
+    avg_thd = round(sum(r["thd_voltage"] for r in latest_rows) / len(latest_rows), 3)
+    total_kw = round(sum(r["active_power_kw"] for r in latest_rows), 2)
+    worst_pf = min(latest_rows, key=lambda r: r["power_factor"])
+    worst_thd = max(latest_rows, key=lambda r: r["thd_voltage"])
+
+    return {
+        "has_data": True,
+        "timestamp_context_generated": datetime.now(timezone.utc).isoformat(),
+        "system": "SIM-QEI protótipo com dados simulados de qualidade de energia industrial",
+        "rules": {
+            "power_factor_limit": 0.92,
+            "thd_voltage_limit_pct": 5.0,
+            "sag_voltage_threshold_v": 198.0,
+            "swell_voltage_threshold_v": 242.0,
+            "frequency_range_hz": [59.5, 60.5],
+        },
+        "global_snapshot": {
+            "monitored_cdcs": len(latest_rows),
+            "total_active_power_kw_now": total_kw,
+            "avg_power_factor_now": avg_pf,
+            "avg_thd_voltage_pct_now": avg_thd,
+            "worst_power_factor_cdc": {"cdc": worst_pf["cdc"], "power_factor": worst_pf["power_factor"]},
+            "worst_thd_voltage_cdc": {"cdc": worst_thd["cdc"], "thd_voltage_pct": worst_thd["thd_voltage"]},
+            "recent_alarm_count_2h": len(recent_alarms),
+        },
+        "latest_by_cdc": latest_rows,
+        "window_stats_by_cdc": summarize_cdc_stats(window_rows) if window_rows else {},
+        "recent_alarms": recent_alarms,
+        "recent_decisions": recent_decisions,
+    }
+
+
+def build_deterministic_answer(question: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    if not context.get("has_data"):
+        return {"answer": "Ainda não há dados no banco. Aguarde o simulador Edge enviar as primeiras leituras.", "provider": "deterministic"}
+
+    q = question.lower().strip()
+    latest_rows = context["latest_by_cdc"]
+    recent_alarms = context["recent_alarms"]
+    snapshot = context["global_snapshot"]
+    avg_pf = snapshot["avg_power_factor_now"]
+    avg_thd = snapshot["avg_thd_voltage_pct_now"]
+    total_kw = snapshot["total_active_power_kw_now"]
     worst_pf = min(latest_rows, key=lambda r: r["power_factor"])
     worst_thd = max(latest_rows, key=lambda r: r["thd_voltage"])
 
@@ -530,7 +642,7 @@ def build_agent_answer(question: str) -> Dict[str, Any]:
         answer = (
             "Relatório executivo SIM-QEI: "
             f"potência ativa total atual de {total_kw:.1f} kW, FP médio {avg_pf:.3f}, THDv média {avg_thd:.2f}% "
-            f"e {len(recent_alarms)} alarmes registrados na última hora. "
+            f"e {len(recent_alarms)} alarmes registrados nas últimas 2 horas. "
         )
         if recent_alarms:
             critical = recent_alarms[0]
@@ -548,17 +660,168 @@ def build_agent_answer(question: str) -> Dict[str, Any]:
             "Você pode perguntar sobre fator de potência, harmônicas, tensão ou pedir um relatório executivo."
         )
 
-    sources = [
-        {"type": "latest_telemetry", "items": latest_rows},
-        {"type": "recent_alarms", "items": recent_alarms[:3]},
-        {"type": "recent_decisions", "items": recent_decisions[:3]},
+    return {"answer": answer, "provider": "deterministic"}
+
+
+def make_llm_messages(question: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
+    system = (
+        "Você é o Agente Autônomo do SIM-QEI, um sistema de qualidade de energia industrial. "
+        "Responda em português do Brasil, com linguagem técnica mas objetiva. "
+        "Use exclusivamente os dados fornecidos no CONTEXTO. Não invente medições, alarmes, horários ou causas. "
+        "Quando não houver dados suficientes, diga claramente que não há evidência suficiente. "
+        "Sempre que útil, cite valores numéricos dos CDCs, limite de FP 0,92, limite de THDv 5%, sag <198 V e swell >242 V. "
+        "Separe a resposta em: Diagnóstico, Evidências, Recomendação e Métrica de acompanhamento. "
+        "Lembre que os dados são simulados para um protótipo acadêmico."
+    )
+    context_json = json.dumps(context, ensure_ascii=False, indent=2, default=str)
+    user = f"CONTEXTO OPERACIONAL DO BANCO DE DADOS:\n{context_json}\n\nPERGUNTA DO USUÁRIO:\n{question}"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def call_ollama(question: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    messages = make_llm_messages(question, context)
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": 0.15, "num_ctx": 8192},
+    }
+    with httpx.Client(timeout=LLM_TIMEOUT_SECONDS) as client:
+        res = client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+        res.raise_for_status()
+        data = res.json()
+    answer = data.get("message", {}).get("content") or "O LLM local não retornou conteúdo."
+    return {"answer": answer.strip(), "provider": "ollama", "model": OLLAMA_MODEL}
+
+
+def call_openai(question: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY não configurada.")
+    messages = make_llm_messages(question, context)
+    input_payload = [
+        {"role": "system", "content": [{"type": "input_text", "text": messages[0]["content"]}]},
+        {"role": "user", "content": [{"type": "input_text", "text": messages[1]["content"]}]},
     ]
-    return {"answer": answer, "sources": sources}
+    payload = {
+        "model": OPENAI_MODEL,
+        "input": input_payload,
+        "temperature": 0.15,
+        "max_output_tokens": 900,
+    }
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    with httpx.Client(timeout=LLM_TIMEOUT_SECONDS) as client:
+        res = client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
+        res.raise_for_status()
+        data = res.json()
+
+    # A Responses API normalmente retorna output_text em SDKs; via HTTP o texto pode vir em output[].content[].text.
+    answer = data.get("output_text")
+    if not answer:
+        chunks = []
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if "text" in content:
+                    chunks.append(content["text"])
+        answer = "\n".join(chunks).strip()
+    return {"answer": (answer or "A API OpenAI não retornou conteúdo.").strip(), "provider": "openai", "model": OPENAI_MODEL}
+
+
+def log_chat(provider: str, model: Optional[str], question: str, answer: str, context: Dict[str, Any]) -> None:
+    summary = {
+        "global_snapshot": context.get("global_snapshot"),
+        "recent_alarm_count": len(context.get("recent_alarms", [])),
+        "cdcs": list((context.get("window_stats_by_cdc") or {}).keys()),
+    }
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO chat_logs (provider, model, question, answer, context_summary)
+                    VALUES (%s, %s, %s, %s, %s::jsonb);
+                    """,
+                    (provider, model, question, answer, json.dumps(summary, ensure_ascii=False)),
+                )
+            conn.commit()
+    except Exception:
+        # Não derruba a resposta se o log falhar.
+        return
+
+
+def build_agent_answer(question: str) -> Dict[str, Any]:
+    context = collect_agent_context()
+    if not context.get("has_data"):
+        deterministic = build_deterministic_answer(question, context)
+        return {**deterministic, "model": None, "sources": context}
+
+    provider_used = "deterministic"
+    model_used = None
+    fallback_reason = None
+
+    try:
+        if LLM_PROVIDER == "openai":
+            llm_result = call_openai(question, context)
+        elif LLM_PROVIDER == "ollama":
+            llm_result = call_ollama(question, context)
+        elif LLM_PROVIDER in {"mock", "deterministic", "none", "off"}:
+            llm_result = build_deterministic_answer(question, context)
+        else:
+            raise RuntimeError(f"LLM_PROVIDER inválido: {LLM_PROVIDER}")
+
+        answer = llm_result["answer"]
+        provider_used = llm_result.get("provider", provider_used)
+        model_used = llm_result.get("model")
+    except Exception as exc:  # noqa: BLE001
+        fallback = build_deterministic_answer(question, context)
+        answer = (
+            f"[Fallback determinístico usado porque o LLM não respondeu: {exc}]\n\n"
+            f"{fallback['answer']}"
+        )
+        fallback_reason = str(exc)
+
+    log_chat(provider_used, model_used, question, answer, context)
+    return {
+        "answer": answer,
+        "provider": provider_used,
+        "model": model_used,
+        "fallback_reason": fallback_reason,
+        "sources": {
+            "global_snapshot": context.get("global_snapshot"),
+            "latest_by_cdc": context.get("latest_by_cdc", []),
+            "window_stats_by_cdc": context.get("window_stats_by_cdc", {}),
+            "recent_alarms": context.get("recent_alarms", [])[:5],
+            "recent_decisions": context.get("recent_decisions", [])[:3],
+        },
+    }
 
 
 @app.post("/api/agent/chat")
 def agent_chat(payload: ChatIn):
     return build_agent_answer(payload.question)
+
+
+@app.get("/api/llm/status")
+def llm_status():
+    status = {
+        "configured_provider": LLM_PROVIDER,
+        "ollama_url": OLLAMA_URL,
+        "ollama_model": OLLAMA_MODEL,
+        "openai_model": OPENAI_MODEL,
+        "openai_key_configured": bool(OPENAI_API_KEY),
+        "ollama_available": False,
+        "ollama_models": [],
+    }
+    if LLM_PROVIDER == "ollama":
+        try:
+            with httpx.Client(timeout=5) as client:
+                res = client.get(f"{OLLAMA_URL}/api/tags")
+                res.raise_for_status()
+                data = res.json()
+                status["ollama_available"] = True
+                status["ollama_models"] = [m.get("name") for m in data.get("models", [])]
+        except Exception as exc:  # noqa: BLE001
+            status["ollama_error"] = str(exc)
+    return status
 
 
 @app.get("/api/architecture")
@@ -571,12 +834,18 @@ def architecture():
             "API Gateway lógico via FastAPI",
             "Cloud/microsserviços simplificados",
             "Banco PostgreSQL para séries temporais",
-            "Camada de IA determinística com agentes",
+            "Camada de IA com regras + LLM contextualizado",
             "Frontend web operacional",
         ],
+        "llm_integration": {
+            "provider": LLM_PROVIDER,
+            "ollama_model": OLLAMA_MODEL,
+            "openai_model": OPENAI_MODEL if bool(OPENAI_API_KEY) else None,
+            "strategy": "RAG simplificado: coleta contexto do banco, monta prompt técnico e força resposta baseada nos dados.",
+        },
         "agent_loop": {
             "input": "Telemetria elétrica simulada",
-            "decision": "Regras técnicas de qualidade de energia + classificação de severidade",
+            "decision": "Regras técnicas de qualidade de energia + classificação de severidade + LLM consultivo",
             "action": "Alarme, recomendação, registro de decisão e resposta em linguagem natural",
             "metric": "FP, THD, tensão, tempo de detecção, quantidade de alarmes e retorno à faixa normal",
         },
